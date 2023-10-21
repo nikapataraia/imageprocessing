@@ -1,10 +1,15 @@
+import time
 import numpy as np
 import cv2 as cv
 import os
+from scipy import signal
+
 curdir = os.path.dirname(os.path.realpath(__file__))
 stru = '\yy'
 curdir = curdir.replace(stru[0], '/') + '/'
 im_name = 'Capture1.PNG'
+vid_name = '2.mp4'
+
 blur_arr1 = np.array([[0.003, 0.013, 0.022, 0.013, 0.003],
                       [0.013, 0.05, 0.078, 0.05, 0.098],
                       [0.022, 0.078, 0.114, 0.078, 0.022],
@@ -23,6 +28,7 @@ num3x3 = 1/9
 blur_arr2 = np.array([[num3x3, num3x3, num3x3],
                       [num3x3, num3x3, num3x3],
                       [num3x3, num3x3, num3x3]])
+blur_arr5 = np.ones((5, 5))/25
 
 blur_arr4 = np.array([[1/16, 1/8, 1/16],
                       [1/8, 1/4, 1/8],
@@ -58,65 +64,167 @@ def conv_img_mat(img, conv_mat):
             vec = list(map(lambda x: int(x), vec))
             row.append(vec)
         result.append(row)
-    return result
+    return np.array(result).astype(np.uint8)
 
 
-def cleare_edged(img, le):
-    for i in range(len(img)):
-        for j in range(len(img[0])):
-            vec = np.zeros(3)
-            for i_2 in range(le):
-                for j_2 in range(le):
-                    try:
-                        vec = vec + \
-                            img[i - int(le/2) + i_2][j - int(le/2) + j_2]
-                    except:
-                        pass
-            vec = list(map(lambda x: int(x/(le**2)), vec))
-            if (np.linalg.norm(vec) < 240):
-                img[i][j] = [255, 255, 255]
-            else:
-                img[i][j] = [0, 0, 0]
-
-
-def edged_img(img, edge_arr, blur_arr, with_grayscale=True, with_blend=True):
+def edged_img(img, edge_arr, blur_arr, with_grayscale=True, with_blend=True, with_edge_detec=True):
+    result = img
+    if (len(img) < 10):
+        print('some kind of image error')
+        return np.array([[1]])
     if (with_grayscale):
         img = grayscale(img)
     if (with_blend):
-        img = conv_img_mat(img, blur_arr)
+        img = cv.filter2D(img, -1, blur_arr)
         img = np.array(img).astype(np.uint8)
-    on_y = conv_img_mat(img, edge_arr)
-    on_x = conv_img_mat(img, edge_arr.T)
-    result = np.sqrt(np.square(on_y) + np.square(on_x))
-    result *= 255.0 / result.max()
-    # cleare_edged(result,3)
-    return result
+    if (with_edge_detec):
+        on_y = cv.filter2D(img, 0, edge_arr)
+        on_x = cv.filter2D(img, 0, edge_arr.T)
+        result = np.sqrt(np.square(on_y) + np.square(on_x))
+    result = result*4
+    # cv.imshow('h' , result.astype(np.uint8).T)
+    # result *= 255.0 / result.max()
+    return np.array(result).astype(np.uint8)
 
 
-def houghtransf(pic):
-    height, width = len(pic), len(pic[0])
-    Amc = np.zeros((int(height/5), int(width/5)))
-    for i in range(0, height-0):
-        for j in range(0, width-0):
-            if (np.linalg.norm(pic[i][j] > 150)):
-                # j = m*i + c
-                # c = -m*i + j
-                for m in range(int(width/5)):
-                    c = -m*i + j
-                    if (c >= 0 and c < int(height/5)):
-                        Amc[c][m] = Amc[c][m] + 1
-
-    first_max = np.where(Amc == np.amax(Amc))
-    print(first_max)
-    print(Amc[1][0])
+def frame_diff(prev, cur, next):
+    diff1 = cv.absdiff(prev, cur)
+    diff2 = cv.absdiff(cur, next)
+    return cv.bitwise_and(diff1, diff2)
 
 
-path = curdir + im_name
-newd = cv.imread(path)
-newd = edged_img(newd, conv_arr2, blur_arr4, True, True)
-newd = np.array(newd)
-newd = newd.astype(np.uint8)
+path = curdir + vid_name
+video = cv.VideoCapture(path)
+frame_rate = video.get(cv.CAP_PROP_FPS)
+ret, prevframe = video.read()
 
-houghtransf(newd)
-cv.imshow('edged', newd)
+prevframe = edged_img(prevframe, conv_arr2, blur_arr4, True, True)
+ret, curframe = video.read()
+curframe = edged_img(curframe, conv_arr2, blur_arr4, True, True)
+ret, nextframe = video.read()
+nextframe = edged_img(nextframe, conv_arr2, blur_arr4, True, True)
+
+prevframe = cv.resize(prevframe, None, None, 0.5, 0.5,
+                      interpolation=cv.INTER_AREA)
+curframe = cv.resize(curframe, None, None, 0.5, 0.5,
+                     interpolation=cv.INTER_AREA)
+nextframe = cv.resize(nextframe, None, None, 0.5, 0.5,
+                      interpolation=cv.INTER_AREA)
+
+
+# GLOBAL PARAMS.
+from_up = False
+meteres = 500
+frames_car_was_in = 0
+see_car = False
+car_out = False
+
+
+def takeavrg(mat):
+    return np.sum(mat)/(len(mat) * len(mat[0]))
+
+
+def detect_car(mat):
+    global see_car, from_up, frames_car_was_in, car_out
+    if (not see_car):
+        for i in range(int(len(mat)/16)):
+           i = i * 4
+           for j in range(int(len(mat[0])/4)):
+               j = j * 4
+               sub_mat = mat[i:i+15, j:j+15]
+               if (np.sum(sub_mat)/225 > 4):
+                   from_up = True
+                   see_car = True
+                   return
+        for i in range(int(len(mat)*(5/28)), int(len(mat)/4)):
+           i = i * 4
+           for j in range(int(len(mat[0])/4)):
+               j = j * 4
+               sub_mat = mat[i:i+15, j:j+15]
+               if (np.sum(sub_mat)/225 > 4):
+                   from_up = False
+                   see_car = True
+                   return
+
+
+def redetect_car(mat):
+    global see_car, from_up, frames_car_was_in, car_out
+    if (not from_up):
+        for i in range(int(len(mat)/25)):
+           i = i * 4
+           for j in range(int(len(mat[0])/4)):
+               j = j * 4
+               sub_mat = mat[i:i+10, j:j+10]
+               if (np.sum(sub_mat)/100 > 3):
+                   car_out = True
+                   see_car = False
+                   return
+    else:
+        for i in range(int(len(mat)*(9/40)), int(len(mat)/4)):
+           i = i * 4
+           for j in range(int(len(mat[0])/4)):
+               j = j * 4
+               sub_mat = mat[i:i+10, j:j+10]
+               if (np.sum(sub_mat)/100 > 3):
+                   car_out = True
+                   see_car = False
+                   return
+
+# def detect_car(mat):
+#     global see_car, from_up,  car_out
+#     sub_mat1 =
+
+
+# def redetect_car(mat):
+#     global see_car, from_up, car_out
+def calculatespeed():
+ if (frames_car_was_in != 0):
+    time_ = (frames_car_was_in/frame_rate)
+    speed = meteres/time_
+    speed = (speed/1000) * 360
+    print("speed - " + f'{speed}' + ' km/hr')
+ else:
+    print('there was no car')
+
+
+while video.isOpened():
+    framediff = np.array(frame_diff(
+        prevframe, curframe, nextframe)).astype(np.uint8)
+    # _,frame_th = cv.threshold(framediff,0,255,cv.THRESH_TRIANGLE)
+    prevframe = curframe
+    curframe = nextframe
+    ret, nextframe = video.read()
+    if not ret:
+        break
+    nextframe = edged_img(nextframe, conv_arr2, blur_arr4, True, True)
+    nextframe = cv.resize(nextframe, None, None, 0.5,
+                          0.5, interpolation=cv.INTER_AREA)
+    # frame_th = cv.resize(frame_th,None,None,0.5,0.8,interpolation=cv.INTER_AREA)
+    # framediff *= 255.0 / framediff.max()
+    # framediff = framediff.astype(np.uint8)
+
+    # cv.imshow('2',frame_th)
+    # print('on right ' + str(from_up))
+
+    if (see_car):
+        redetect_car(framediff.T)
+        frames_car_was_in = frames_car_was_in + 1
+    if (not see_car):
+        detect_car(framediff.T)
+
+    # this breaks after the first car leaves the area,
+    if (car_out):
+        calculatespeed()
+        frames_car_was_in = 0
+        break
+
+    cv.imshow('press q tu quit', framediff)
+    if (cv.waitKey(20) & 0xFF == ord('q')):
+        break
+
+
+# newd = edged_img(tmp, conv_arr2, blur_arr4, True, True)
+# newd = np.array(newd)
+# newd = newd.astype(np.uint8)
+# cv.imshow('edged', newd)
 cv.waitKey(0)
